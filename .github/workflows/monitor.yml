@@ -41,7 +41,6 @@ jobs:
           AFTERQUERY_AUTH_B64: ${{ secrets.AFTERQUERY_AUTH_B64 }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MONITOR_SELECTOR: ${{ vars.MONITOR_SELECTOR }}
         run: node monitor.mjs
 
       - name: Upload debug screenshot

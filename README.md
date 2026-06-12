@@ -3,7 +3,8 @@
 Free, unattended watcher for **https://experts.afterquery.com/projects/pluto?tab=submissions**.
 It runs in **GitHub Actions** (no server, no cost), opens the page in a real
 headless browser using a login session you capture once, and **messages you on
-Telegram** when the submissions list changes.
+Telegram the moment Pluto submissions reopen** (the "Submissions are currently
+paused" / disabled "Add Submission" state flips to open).
 
 ## Why it's built this way
 
@@ -80,15 +81,16 @@ sends you a "monitor is live" Telegram message. After that it runs hourly.
 
 ## Day-to-day
 
-- **You'll get a Telegram ping** when the submissions list changes.
+- **You'll get a 🎉 Telegram ping** the moment submissions flip from paused to
+  open. `state/last.txt` simply holds `paused` or `open`.
 - **Session expired?** You'll get a ⚠️ message. Re-run `node capture-auth.mjs`,
   redo step 2, and update the `AFTERQUERY_AUTH_B64` secret. (Expect this every
   few weeks at most.)
-- **Too noisy / wrong area?** After the first real run, look at `state/last.txt`
-  in the repo to see what's being captured. If it's grabbing more than the
-  submissions, set a repo **Variable** (Settings → Variables → Actions) named
-  `MONITOR_SELECTOR` to a tighter CSS selector. Download the `debug-screenshot`
-  artifact from any run to help pick one.
+- **What it watches:** the page text for "Submissions are currently paused" /
+  "Submissions paused". To avoid false "it's open!" alerts, it only trusts an
+  "open" reading when the real page rendered (the "Add Submission" anchor is
+  present); otherwise it stays silent. Download the `debug-screenshot` artifact
+  from any run to see exactly what it saw.
 
 ## Cost / budget
 

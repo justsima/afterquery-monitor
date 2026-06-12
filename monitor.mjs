@@ -1,20 +1,30 @@
 // monitor.mjs
 // Runs in GitHub Actions on a schedule. Restores the saved Firebase session,
-// opens the Pluto submissions page in headless Chromium, extracts the
-// submissions text, compares it against the last run, and pings Telegram when
-// it changes (or when the session has expired and needs re-capturing).
+// opens the Pluto submissions page in headless Chromium, and watches ONE thing:
+// whether submissions are PAUSED or OPEN. It pings Telegram the moment the
+// pause is lifted (paused -> open), and also if the session needs re-capturing.
+//
+// Why a boolean instead of a full-text diff: the goal is "tell me when the
+// 'Submissions are currently paused' state changes" — not "tell me when any
+// submission row changes". Tracking the pause flag directly avoids false alerts.
 
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 
 const TARGET_URL = 'https://experts.afterquery.com/projects/pluto?tab=submissions';
 const STATE_FILE = 'state/last.txt';
-// Which part of the page to watch. After your first real run, look at
-// state/last.txt to see what's captured, then narrow this via the
-// MONITOR_SELECTOR repo variable if there's too much noise.
-const SELECTOR = process.env.MONITOR_SELECTOR || 'main';
 
-// In CI the session arrives base64-encoded in a secret. Decode it to auth.json.
+// Phrases that mean "you cannot submit right now".
+const PAUSED_PATTERNS = [
+  /submissions are currently paused/i,
+  /submissions paused/i,
+  /submissions are temporarily (closed|paused)/i,
+];
+// Proof the real page actually rendered for a logged-in user. If none of these
+// are present we assume a render failure / logout and refuse to draw any
+// conclusion (prevents a false "it's open!" alert from a blank page).
+const ANCHOR_PATTERNS = [/add submission/i, /my submissions/i, /requirements for approval/i];
+
 if (process.env.AFTERQUERY_AUTH_B64) {
   fs.writeFileSync('auth.json', Buffer.from(process.env.AFTERQUERY_AUTH_B64, 'base64'));
 }
@@ -42,49 +52,35 @@ async function notify(text) {
   }
 }
 
-function normalize(s) {
-  // Strip volatile bits so relative timestamps don't look like "changes".
-  return s
-    .replace(/\d+\s*(second|minute|hour|day|week|month|year)s?\s*ago/gi, '')
-    .replace(/just now/gi, '')
-    .replace(/\b\d{1,2}:\d{2}(:\d{2})?\s*(am|pm)?\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ storageState: 'auth.json' });
 const page = await context.newPage();
 
-let content = '';
+let bodyText = '';
 let expired = false;
 try {
   await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
-  await page.waitForTimeout(6000); // give Firestore time to render the list
+  // Wait until the app has actually rendered the submissions UI (or give up).
+  try {
+    await page.waitForFunction(
+      () => /add submission|my submissions/i.test(document.body.innerText || ''),
+      { timeout: 25000 }
+    );
+  } catch {
+    await page.waitForTimeout(6000);
+  }
 
   const url = page.url();
-  const bodyText = await page.evaluate(() => document.body.innerText || '');
+  bodyText = await page.evaluate(() => document.body.innerText || '');
 
-  // Heuristic: bounced to the login screen => session no longer valid.
   const looksLikeLogin =
     /\/login/i.test(url) ||
     (/continue with google|sign in to|log in/i.test(bodyText) && bodyText.length < 1500);
+  if (looksLikeLogin) expired = true;
 
-  if (looksLikeLogin) {
-    expired = true;
-  } else {
-    try {
-      content = await page.locator(SELECTOR).first().innerText({ timeout: 10000 });
-    } catch {
-      content = bodyText;
-    }
-  }
-
-  try {
-    await page.screenshot({ path: 'debug.png', fullPage: true });
-  } catch {}
+  try { await page.screenshot({ path: 'debug.png', fullPage: true }); } catch {}
 } catch (e) {
-  console.error('Navigation/scrape error:', e.message);
+  console.error('Navigation error:', e.message);
   try { await page.screenshot({ path: 'debug.png', fullPage: true }); } catch {}
 } finally {
   await browser.close();
@@ -96,22 +92,35 @@ if (expired) {
   process.exit(0);
 }
 
-if (!content || content.trim().length < 5) {
-  console.log('Empty content captured — not updating baseline. Check debug.png artifact.');
+// Did the page really render? If not, stay silent — never guess "open".
+const rendered = ANCHOR_PATTERNS.some((re) => re.test(bodyText));
+if (!rendered) {
+  console.log('Page did not render the submissions UI (no anchor found). Skipping — see debug.png artifact.');
   process.exit(0);
 }
 
-const normalized = normalize(content);
-const prev = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE, 'utf8') : '';
-fs.mkdirSync('state', { recursive: true });
-fs.writeFileSync(STATE_FILE, normalized);
+const paused = PAUSED_PATTERNS.some((re) => re.test(bodyText));
+const current = paused ? 'paused' : 'open';
 
-if (!prev) {
-  console.log('First run — baseline saved.');
-  await notify('✅ AfterQuery Pluto submissions monitor is live. Baseline captured — I\'ll message you when the submissions list changes.\n' + TARGET_URL);
-} else if (prev !== normalized) {
-  console.log('CHANGE detected.');
-  await notify('🔔 AfterQuery Pluto *submissions changed*.\n' + TARGET_URL);
+const prevRaw = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE, 'utf8').trim() : '';
+const prev = prevRaw === 'paused' || prevRaw === 'open' ? prevRaw : null; // null = first run / reset
+
+fs.mkdirSync('state', { recursive: true });
+fs.writeFileSync(STATE_FILE, current);
+
+console.log(`prev=${prev ?? '(none)'} current=${current}`);
+
+if (prev === null) {
+  // First run (or migrating from the old state format): just report status.
+  if (paused) {
+    await notify('🔕 AfterQuery Pluto: submissions are currently PAUSED.\nI\'ll message you the instant they reopen.\n' + TARGET_URL);
+  } else {
+    await notify('🟢 AfterQuery Pluto: submissions are currently OPEN.\n' + TARGET_URL);
+  }
+} else if (prev === 'paused' && current === 'open') {
+  await notify('🎉🎉 AfterQuery Pluto SUBMISSIONS ARE OPEN! The pause has been lifted — go add your submission:\n' + TARGET_URL);
+} else if (prev === 'open' && current === 'paused') {
+  await notify('🔕 Heads up: AfterQuery Pluto submissions were just PAUSED again.\n' + TARGET_URL);
 } else {
-  console.log('No change.');
+  console.log('No change in pause status.');
 }
