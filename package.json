@@ -1,0 +1,15 @@
+{
+  "name": "afterquery-monitor",
+  "version": "1.0.0",
+  "description": "Free, unattended monitor for AfterQuery Experts (Pluto) submissions. Real headless browser replays a saved Firebase/Google login, diffs the submissions list, and pings Telegram on change.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "capture": "node capture-auth.mjs",
+    "monitor": "node monitor.mjs",
+    "postinstall-browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.51.0"
+  }
+}
